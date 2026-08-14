@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Pronunciation Caption Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600&family=Inter:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --caption-scale:1;
+    --anim-dur:360ms;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;width:100%;height:100%;background:#111;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    overflow:hidden;
+  }
+  body{display:flex;align-items:center;justify-content:center;}
+
+  #app{
+    position:relative;
+    width:100%;height:100%;
+    max-width:min(100vw, 56.25vh);
+    max-height:100vh;
+    background:#000;
+    overflow:hidden;
+    display:flex;flex-direction:column;
+    container-type:inline-size;
+    container-name:capframe;
+  }
+  @media (min-aspect-ratio: 9/16){
+    #app{ width:56.25vh; height:100vh; max-width:56.25vh; }
+  }
+
+  /* ===== TOP PROGRESS BAR ===== */
+  #topbar{
+    position:absolute;top:0;left:0;right:0;height:3px;
+    background:rgba(255,255,255,0.12);z-index:20;
+  }
+  #topbar-fill{
+    height:100%;background:#fff;width:0%;
+    transition:width 120ms linear;
+  }
+  .presenting #topbar{display:none;}
+
+  /* ===== STAGE / SAFE AREA ===== */
+  #stage{
+    position:relative;flex:1 1 auto;overflow:hidden;cursor:pointer;
+    background:#000;
+  }
+  #caption-zone{
+    position:absolute;
+    left:9%;right:9%;top:15%;bottom:22%;
+    overflow:hidden;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .presenting #caption-zone{
+    left:8%;right:8%;top:13%;bottom:18%;
+  }
+
+  /* ===== WORD UNIT ===== */
+  .comp{
+    position:absolute;
+    display:flex;flex-direction:column;
+    align-items:center;justify-content:center;
+    row-gap:0.22em;
+    left:0;right:0;
+    top:50%;
+    transform:translateY(-50%);
+    opacity:1;
+    transition:transform var(--anim-dur) cubic-bezier(.22,.61,.36,1),
+               opacity var(--anim-dur) cubic-bezier(.22,.61,.36,1);
+    will-change:transform,opacity;
+  }
+  .comp-line{
+    display:flex;flex-direction:row;align-items:flex-end;
+    justify-content:center;column-gap:0.5em;
+  }
+  .word-unit{
+    display:inline-flex;flex-direction:column;align-items:center;
+    line-height:0.94;
+    white-space:nowrap;
+  }
+  .word-unit .eng{
+    font-family:"Oswald","Roboto Condensed","Arial Narrow",Arial,sans-serif;
+    text-transform:uppercase;
+    color:#fff;
+    font-size:1em;
+    letter-spacing:0.008em;
+  }
+  .word-unit .ipa{
+    font-family:"Inter",-apple-system,Arial,sans-serif;
+    font-weight:300;
+    letter-spacing:0.03em;
+    color:#fff;
+    opacity:0.68;
+    font-size:0.3em;
+    margin-bottom:0.3em;
+  }
+  .size-small{
+    font-size:clamp(30px, calc(8.6cqw * var(--caption-scale)), 56px);
+  }
+  .size-small .eng{ font-weight:400; }
+  .size-medium{
+    font-size:clamp(46px, calc(12.4cqw * var(--caption-scale)), 82px);
+  }
+  .size-medium .eng{ font-weight:450; }
+  .size-large{
+    font-size:clamp(66px, calc(17.2cqw * var(--caption-scale)), 122px);
+  }
+  .size-large .eng{ font-weight:560; letter-spacing:0.004em; }
+  .size-large .ipa{ opacity:0.8; }
+
+  /* enter/exit states, applied via class swap */
+  .comp.enter-next{ transform:translateY(calc(-50% + 44px)); opacity:0; }
+  .comp.enter-prev{ transform:translateY(calc(-50% - 44px)); opacity:0; }
+  .comp.exit-next{ transform:translateY(calc(-50% - 44px)); opacity:0; }
+  .comp.exit-prev{ transform:translateY(calc(-50% + 44px)); opacity:0; }
+  .comp.resting{ transform:translateY(-50%); opacity:1; }
+
+  /* ===== CONTROLS ===== */
+  #panel-toggle{
+    position:absolute;right:14px;bottom:14px;z-index:30;
+    width:40px;height:40px;border-radius:50%;
+    background:rgba(255,255,255,0.12);border:none;color:#fff;
+    display:flex;align-items:center;justify-content:center;
+    font-size:16px;cursor:pointer;
+  }
+  .presenting #panel-toggle, .presenting #controls, .presenting .float-btn{
+    display:none !important;
+  }
+
+  #controls{
+    position:relative;z-index:20;
+    background:#0a0a0a;color:#fff;
+    padding:10px 12px 14px;
+    font-family:Inter,Arial,sans-serif;
+    font-size:12px;
+    display:flex;flex-direction:column;gap:8px;
+    border-top:1px solid rgba(255,255,255,0.08);
+  }
+  #controls.hidden{display:none;}
+  .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .row label{opacity:0.7;font-size:11px;white-space:nowrap;}
+  .row input[type="range"]{flex:1;min-width:60px;}
+  button.ctl{
+    background:rgba(255,255,255,0.1);color:#fff;border:none;
+    border-radius:6px;padding:7px 10px;font-size:12px;cursor:pointer;
+    font-family:Inter,Arial,sans-serif;
+  }
+  button.ctl:hover{background:rgba(255,255,255,0.18);}
+  button.ctl.active{background:#fff;color:#000;}
+  .spacer{flex:1;}
+
+  .float-btn{
+    position:absolute;z-index:30;
+    width:38px;height:38px;border-radius:50%;
+    background:rgba(255,255,255,0.12);border:none;color:#fff;
+    display:flex;align-items:center;justify-content:center;
+    font-size:15px;cursor:pointer;
+  }
+  #btn-edit{left:14px;top:14px;}
+  #btn-import{left:60px;top:14px;}
+  #btn-present{right:14px;top:14px;}
+
+  /* ===== FULLSCREEN OVERLAYS (edit / import) ===== */
+  .overlay{
+    position:fixed;inset:0;background:#000;z-index:100;
+    display:flex;flex-direction:column;padding:16px;
+    font-family:Inter,Arial,sans-serif;color:#fff;
+  }
+  .overlay.hidden{display:none;}
+  .overlay h2{font-size:14px;font-weight:500;margin:0 0 8px;opacity:0.85;}
+  .overlay p.hint{font-size:11px;opacity:0.55;line-height:1.5;margin:0 0 10px;}
+  .overlay textarea{
+    flex:1;width:100%;background:#111;color:#fff;border:1px solid #333;
+    border-radius:8px;padding:12px;font-family:"SF Mono",Consolas,monospace;
+    font-size:12px;line-height:1.5;resize:none;
+  }
+  .overlay .actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+  .overlay .actions button{
+    background:rgba(255,255,255,0.12);color:#fff;border:none;
+    border-radius:6px;padding:9px 14px;font-size:12px;cursor:pointer;
+  }
+  .overlay .actions button.primary{background:#fff;color:#000;}
+  .overlay .status{font-size:11px;opacity:0.7;margin-top:6px;min-height:14px;}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="topbar"><div id="topbar-fill"></div></div>
+
+  <div id="stage">
+    <div id="caption-zone"></div>
+
+    <button class="float-btn" id="btn-import" title="New transcript (T)">＋</button>
+    <button class="float-btn" id="btn-edit" title="Edit JSON (E)">✎</button>
+    <button class="float-btn" id="btn-present" title="Presentation mode (F)">⛶</button>
+  </div>
+
+  <button id="panel-toggle" title="Show/hide controls">⋯</button>
+
+  <div id="controls">
+    <div class="row">
+      <button class="ctl" id="btn-prev">◀ Prev</button>
+      <button class="ctl" id="btn-play">▶ Play</button>
+      <button class="ctl" id="btn-pause">❚❚ Pause</button>
+      <button class="ctl" id="btn-next">Next ▶</button>
+      <button class="ctl" id="btn-reset">Reset</button>
+      <span class="spacer"></span>
+      <span id="counter" style="opacity:0.6;">0 / 0</span>
+    </div>
+    <div class="row">
+      <label>Speed</label>
+      <input type="range" id="anim-speed" min="0.5" max="2" step="0.05" value="1">
+      <label>Font</label>
+      <input type="range" id="font-scale" min="0.75" max="1.35" step="0.05" value="1">
+    </div>
+    <div class="row">
+      <button class="ctl active" id="btn-ipa">IPA: On</button>
+      <button class="ctl active" id="btn-autoplay-dur">Autoplay: Chunk Duration</button>
+      <span class="spacer"></span>
+      <button class="ctl" id="btn-export">Export JSON</button>
+    </div>
+  </div>
+</div>
+
+<!-- IMPORT / TRANSCRIPT-TO-CAPTIONS PANEL -->
+<div class="overlay hidden" id="import-overlay">
+  <h2>New transcript → captions</h2>
+  <p class="hint">
+    Paste each word immediately followed by its IPA in slashes, in any order/line breaks —
+    e.g. <code>Tonight /təˈnaɪt/ I /aɪ/ can /kən/ report /rɪˈpɔrt/ ...</code>.
+    The engine will auto-chunk into 5–9 word captions at punctuation boundaries,
+    classify each word small/medium/large from its IPA complexity and stopword status,
+    and fit everything to the existing renderer — no HTML/CSS editing needed.
+  </p>
+  <textarea id="import-textarea" placeholder="Tonight /təˈnaɪt/ I /aɪ/ can /kən/ report /rɪˈpɔrt/ that /ðət/ the /ðə/ United /juˈnaɪtɪd/ States /steɪts/ is /ɪz/ ready /ˈrɛdi/ ."></textarea>
+  <div class="status" id="import-status"></div>
+  <div class="actions">
+    <button class="primary" id="btn-generate">Generate Captions</button>
+    <button id="btn-import-cancel">Cancel</button>
+  </div>
+</div>
+
+<!-- EDIT MODE (raw JSON) -->
+<div class="overlay hidden" id="edit-overlay">
+  <h2>Edit captions JSON</h2>
+  <textarea id="edit-textarea" spellcheck="false"></textarea>
+  <div class="status" id="edit-status"></div>
+  <div class="actions">
+    <button id="btn-format">Format</button>
+    <button id="btn-edit-cancel">Cancel</button>
+    <button class="primary" id="btn-apply">Apply</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* =========================================================
+     DATA: default sample captions (same structural shape as
+     the original master style). Replace via Import/Edit.
+  ========================================================= */
+  let captions = [
+    {
+      duration: 2400,
+      words: [
+        { text:"Tonight", ipa:"/təˈnaɪt/", size:"large" },
+        { text:"I", ipa:"/aɪ/", size:"small" },
+        { text:"can", ipa:"/kən/", size:"small" },
+        { text:"report", ipa:"/rɪˈpɔrt/", size:"large" }
+      ]
+    },
+    {
+      duration: 2600,
+      words: [
+        { text:"that", ipa:"/ðət/", size:"small" },
+        { text:"the", ipa:"/ðə/", size:"small" },
+        { text:"United", ipa:"/juˈnaɪtɪd/", size:"large" },
+        { text:"States", ipa:"/steɪts/", size:"medium" },
+        { text:"is", ipa:"/ɪz/", size:"small" },
+        { text:"ready.", ipa:"/ˈrɛdi/", size:"large" }
+      ]
+    }
+  ];
+
+  let current = 0;
+  let showIPA = true;
+  let animSpeed = 1;
+  let fontScale = 1;
+  let autoplayUsesDuration = true;
+  let playing = false;
+  let playTimer = null;
+  let progressRAF = null;
+
+  const $ = (id)=>document.getElementById(id);
+  const app = $('app');
+  const zone = $('caption-zone');
+  const topbarFill = $('topbar-fill');
+  const counter = $('counter');
+
+  /* =========================================================
+     RENDERING (structural grouping + DOM measurement overflow
+     handling), per the master style spec.
+  ========================================================= */
+
+  function buildLinesStructural(words){
+    // Rule 1/2: a large word starts a fresh line, gets at most one more word.
+    // Rule 3: small/medium lines hold at most 3 words.
+    const lines = [];
+    let line = [];
+    let lineHasLarge = false;
+
+    function pushLine(){
+      if(line.length){ lines.push(line); line = []; lineHasLarge=false; }
+    }
+
+    for(const w of words){
+      if(w.size === 'large'){
+        if(line.length){ pushLine(); }
+        line.push(w);
+        lineHasLarge = true;
+        continue;
+      }
+      if(lineHasLarge){
+        if(line.length < 2){ line.push(w); }
+        else { pushLine(); line.push(w); }
+        continue;
+      }
+      if(line.length < 3){ line.push(w); }
+      else { pushLine(); line.push(w); }
+    }
+    pushLine();
+    return lines;
+  }
+
+  function makeWordUnitEl(w){
+    const unit = document.createElement('span');
+    unit.className = 'word-unit size-' + w.size;
+    const ipaEl = document.createElement('span');
+    ipaEl.className = 'ipa';
+    ipaEl.textContent = w.ipa || '';
+    ipaEl.style.display = showIPA ? '' : 'none';
+    const engEl = document.createElement('span');
+    engEl.className = 'eng';
+    engEl.textContent = w.text;
+    unit.appendChild(ipaEl);
+    unit.appendChild(engEl);
+    return unit;
+  }
+
+  function buildCompositionDOM(lines){
+    const comp = document.createElement('div');
+    comp.className = 'comp';
+    for(const line of lines){
+      const lineEl = document.createElement('div');
+      lineEl.className = 'comp-line';
+      for(const w of line){
+        lineEl.appendChild(makeWordUnitEl(w));
+      }
+      comp.appendChild(lineEl);
+    }
+    return comp;
+  }
+
+  function fitComposition(comp){
+    const zoneRect = zone.getBoundingClientRect();
+    const availW = zoneRect.width;
+    const availH = zoneRect.height;
+
+    // Step 2: re-split any line whose scrollWidth exceeds availW.
+    let lineEls = Array.from(comp.querySelectorAll('.comp-line'));
+    for(const lineEl of lineEls){
+      if(lineEl.scrollWidth <= availW) continue;
+      const units = Array.from(lineEl.children);
+      lineEl.innerHTML = '';
+      const newLines = [[]];
+      let runningWidth = 0;
+      const gap = parseFloat(getComputedStyle(lineEl).columnGap) || 0;
+      for(const unit of units){
+        const uw = unit.getBoundingClientRect().width || unit.offsetWidth;
+        const addW = (newLines[newLines.length-1].length ? gap : 0) + uw;
+        if(runningWidth + addW > availW && newLines[newLines.length-1].length){
+          newLines.push([]);
+          runningWidth = 0;
+        }
+        newLines[newLines.length-1].push(unit);
+        runningWidth += addW;
+      }
+      // replace original line with possibly multiple lines
+      const frag = document.createDocumentFragment();
+      newLines.forEach(group=>{
+        const gEl = document.createElement('div');
+        gEl.className = 'comp-line';
+        group.forEach(u=>gEl.appendChild(u));
+        frag.appendChild(gEl);
+      });
+      lineEl.replaceWith(frag);
+    }
+
+    // Step 3: single-word-unit line still wider than available -> scale that word.
+    lineEls = Array.from(comp.querySelectorAll('.comp-line'));
+    for(const lineEl of lineEls){
+      if(lineEl.children.length === 1){
+        const unit = lineEl.children[0];
+        const uw = unit.getBoundingClientRect().width;
+        if(uw > availW){
+          const ratio = Math.max(0.55, (availW / uw) * 0.96);
+          unit.style.fontSize = 'calc(1em * ' + ratio + ')';
+        }
+      }
+    }
+
+    // Step 4: whole composition height check.
+    let compH = comp.getBoundingClientRect().height;
+    if(compH > availH){
+      comp.style.rowGap = '0.1em';
+      compH = comp.getBoundingClientRect().height;
+    }
+    let iter = 0;
+    while(compH > availH && iter < 4){
+      const allUnits = comp.querySelectorAll('.word-unit');
+      allUnits.forEach(u=>{
+        const prevScale = parseFloat(u.dataset.scale || '1');
+        const nextScale = prevScale * 0.94;
+        u.dataset.scale = nextScale;
+        u.style.fontSize = 'calc(1em * ' + nextScale + ')';
+      });
+      compH = comp.getBoundingClientRect().height;
+      iter++;
+    }
+  }
+
+  function renderComposition(index, enterDir){
+    const chunk = captions[index];
+    if(!chunk) return null;
+    const lines = buildLinesStructural(chunk.words);
+    const comp = buildCompositionDOM(lines);
+    comp.style.visibility = 'hidden';
+    comp.classList.add('resting');
+    zone.appendChild(comp);
+    // force reflow before measuring
+    void comp.offsetHeight;
+    fitComposition(comp);
+    comp.style.visibility = '';
+    return comp;
+  }
+
+  function setDurationVar(){
+    const base = 360; // ms
+    const dur = Math.min(450, Math.max(300, base / animSpeed));
+    app.style.setProperty('--anim-dur', dur + 'ms');
+    return dur;
+  }
+
+  function goTo(index, direction){
+    // direction: 'next' | 'prev' | null (no animation, e.g. first render)
+    if(index < 0 || index >= captions.length) return;
+    const dur = setDurationVar();
+    const outgoing = zone.querySelector('.comp');
+
+    const incoming = renderComposition(index);
+    if(!incoming) return;
+
+    if(!direction || !outgoing){
+      if(outgoing) outgoing.remove();
+      incoming.classList.add('resting');
+      current = index;
+      updateChrome();
+      return;
+    }
+
+    incoming.classList.remove('resting');
+    incoming.classList.add(direction === 'next' ? 'enter-next' : 'enter-prev');
+    outgoing.classList.remove('resting');
+
+    void incoming.offsetHeight; // force reflow
+
+    requestAnimationFrame(()=>{
+      incoming.classList.remove('enter-next','enter-prev');
+      incoming.classList.add('resting');
+      outgoing.classList.add(direction === 'next' ? 'exit-next' : 'exit-prev');
+    });
+
+    setTimeout(()=>{ outgoing.remove(); }, dur + 30);
+
+    current = index;
+    updateChrome();
+  }
+
+  function updateChrome(){
+    counter.textContent = (current+1) + ' / ' + captions.length;
+    animateProgress();
+  }
+
+  function animateProgress(){
+    cancelAnimationFrame(progressRAF);
+    const chunk = captions[current];
+    const dur = (chunk && chunk.duration) ? chunk.duration : 2400;
+    if(!playing || !autoplayUsesDuration){
+      topbarFill.style.width = ((current) / Math.max(1,captions.length-1) * 100) + '%';
+      return;
+    }
+    const start = performance.now();
+    function step(t){
+      const elapsed = t - start;
+      const pct = Math.min(1, elapsed/dur);
+      topbarFill.style.width = (pct*100) + '%';
+      if(pct < 1 && playing){ progressRAF = requestAnimationFrame(step); }
+    }
+    progressRAF = requestAnimationFrame(step);
+  }
+
+  function next(){ if(current < captions.length-1) goTo(current+1,'next'); else stop(); }
+  function prev(){ if(current > 0) goTo(current-1,'prev'); }
+
+  function play(){
+    if(playing) return;
+    playing = true;
+    scheduleAutoplay();
+  }
+  function stop(){
+    playing = false;
+    clearTimeout(playTimer);
+    cancelAnimationFrame(progressRAF);
+  }
+  function scheduleAutoplay(){
+    clearTimeout(playTimer);
+    if(!playing) return;
+    const chunk = captions[current];
+    const dur = autoplayUsesDuration && chunk && chunk.duration ? chunk.duration : 2400;
+    animateProgress();
+    playTimer = setTimeout(()=>{
+      if(!playing) return;
+      if(current < captions.length-1){
+        next();
+        scheduleAutoplay();
+      } else {
+        stop();
+      }
+    }, dur);
+  }
+
+  function reset(){
+    stop();
+    goTo(0, null);
+  }
+
+  /* =========================================================
+     CONTROLS WIRING
+  ========================================================= */
+  $('btn-next').addEventListener('click', ()=>{ stop(); next(); });
+  $('btn-prev').addEventListener('click', ()=>{ stop(); prev(); });
+  $('btn-play').addEventListener('click', play);
+  $('btn-pause').addEventListener('click', stop);
+  $('btn-reset').addEventListener('click', reset);
+
+  $('stage').addEventListener('click', (e)=>{
+    if(e.target.closest('.float-btn')) return;
+    stop(); next();
+  });
+
+  $('anim-speed').addEventListener('input', (e)=>{ animSpeed = parseFloat(e.target.value); });
+  $('font-scale').addEventListener('input', (e)=>{
+    fontScale = parseFloat(e.target.value);
+    app.style.setProperty('--caption-scale', fontScale);
+    goTo(current, null);
+  });
+
+  $('btn-ipa').addEventListener('click', (e)=>{
+    showIPA = !showIPA;
+    e.target.textContent = 'IPA: ' + (showIPA ? 'On' : 'Off');
+    e.target.classList.toggle('active', showIPA);
+    goTo(current, null);
+  });
+
+  $('btn-autoplay-dur').addEventListener('click', (e)=>{
+    autoplayUsesDuration = !autoplayUsesDuration;
+    e.target.textContent = 'Autoplay: ' + (autoplayUsesDuration ? 'Chunk Duration' : 'Fixed 2.4s');
+    e.target.classList.toggle('active', autoplayUsesDuration);
+  });
+
+  $('panel-toggle').addEventListener('click', ()=>{
+    $('controls').classList.toggle('hidden');
+  });
+
+  /* Presentation mode */
+  function enterPresentation(){
+    app.classList.add('presenting');
+    if(app.requestFullscreen){ app.requestFullscreen().catch(()=>{}); }
+  }
+  function exitPresentation(){
+    app.classList.remove('presenting');
+    if(document.fullscreenElement){ document.exitFullscreen().catch(()=>{}); }
+  }
+  $('btn-present').addEventListener('click', ()=>{
+    app.classList.contains('presenting') ? exitPresentation() : enterPresentation();
+  });
+  document.addEventListener('fullscreenchange', ()=>{
+    if(!document.fullscreenElement) app.classList.remove('presenting');
+  });
+
+  /* =========================================================
+     EDIT MODE (raw JSON)
+  ========================================================= */
+  const editOverlay = $('edit-overlay');
+  const editTA = $('edit-textarea');
+  const editStatus = $('edit-status');
+
+  function openEdit(){
+    editTA.value = JSON.stringify(captions, null, 2);
+    editStatus.textContent = '';
+    editOverlay.classList.remove('hidden');
+  }
+  $('btn-edit').addEventListener('click', openEdit);
+  $('btn-edit-cancel').addEventListener('click', ()=> editOverlay.classList.add('hidden'));
+  $('btn-format').addEventListener('click', ()=>{
+    try{
+      const parsed = JSON.parse(editTA.value);
+      editTA.value = JSON.stringify(parsed, null, 2);
+      editStatus.textContent = 'Formatted.';
+    }catch(err){ editStatus.textContent = 'Invalid JSON: ' + err.message; }
+  });
+  $('btn-apply').addEventListener('click', ()=>{
+    try{
+      const parsed = JSON.parse(editTA.value);
+      if(!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(c=>Array.isArray(c.words))){
+        throw new Error('Must be a non-empty array of {words:[...]} chunks.');
+      }
+      captions = parsed;
+      stop();
+      goTo(0, null);
+      editOverlay.classList.add('hidden');
+    }catch(err){ editStatus.textContent = 'Invalid JSON: ' + err.message; }
+  });
+
+  /* =========================================================
+     IMPORT / TRANSCRIPT-TO-CAPTIONS ENGINE
+     User pastes: word /ipa/ word /ipa/ ...  (any spacing/newlines)
+     Engine: parses pairs -> auto-chunks 5-9 words at punctuation
+     boundaries -> classifies small/medium/large from stopword +
+     IPA complexity -> assigns per-chunk duration -> renders using
+     the exact same renderer as above.
+  ========================================================= */
+  const importOverlay = $('import-overlay');
+  const importTA = $('import-textarea');
+  const importStatus = $('import-status');
+
+  $('btn-import').addEventListener('click', ()=>{
+    importStatus.textContent = '';
+    importOverlay.classList.remove('hidden');
+  });
+  $('btn-import-cancel').addEventListener('click', ()=> importOverlay.classList.add('hidden'));
+
+  const STOPWORDS = new Set([
+    "a","an","the","to","of","i","in","and","that","so","you","was","we",
+    "is","are","it","on","at","for","with","as","but","or","be","he","she",
+    "they","this","my","your","his","her","our","their","do","does","did",
+    "has","have","had","will","would","can","could","should","must","not",
+    "no","yes","if","then","than","from","by","up","out","about","into",
+    "over","after","before","when","while","where","what","who","how","why",
+    "all","some","any","each","more","most","other","such","only","just",
+    "very","too","also","there","here","now","one","two","get","got","us",
+    "them","him","its","am","been","being","were","'s","'re","'ve","'ll","'d"
+  ]);
+
+  function parseTranscript(raw){
+    const re = /([^\s\/]+)\s*\/([^\/]+)\/\s*/g;
+    const words = [];
+    let m;
+    while((m = re.exec(raw)) !== null){
+      words.push({ text: m[1], ipa: '/' + m[2].trim() + '/' });
+    }
+    return words;
+  }
+
+  function chunkWords(words){
+    const chunks = [];
+    let cur = [];
+    const punctRe = /[.,!?;:]$/;
+    for(let i=0;i<words.length;i++){
+      cur.push(words[i]);
+      const isPunct = punctRe.test(words[i].text);
+      const mustBreak = cur.length >= 9;
+      if(mustBreak || (cur.length >= 5 && isPunct)){
+        chunks.push(cur);
+        cur = [];
+      }
+    }
+    if(cur.length){
+      if(cur.length < 3 && chunks.length){
+        chunks[chunks.length-1] = chunks[chunks.length-1].concat(cur);
+      } else {
+        chunks.push(cur);
+      }
+    }
+    return chunks;
+  }
+
+  const VOWEL_RE = /[aeiouɪʊʌəɑɔæeɛɜɝoʊɐ]/gi;
+
+  function classifyChunk(chunkWordsArr){
+    const scored = chunkWordsArr.map((w)=>{
+      const clean = w.text.replace(/[^a-zA-Z']/g,'').toLowerCase();
+      const isStop = STOPWORDS.has(clean);
+      let score = 0;
+      const ipa = w.ipa || '';
+      if(!isStop){
+        score += 2;
+        const syll = (ipa.match(VOWEL_RE) || []).length;
+        score += syll;
+        if(ipa.indexOf('ˈ') !== -1) score += 1;
+        if(clean.length >= 7) score += 1;
+        if(ipa.indexOf('ɾ') !== -1) score += 1; // American flapping
+        if(/[θðʒ]/.test(ipa)) score += 1; // hard consonants
+      }
+      return { w, isStop, score };
+    });
+
+    scored.forEach(s=>{ s.w.size = s.isStop ? 'small' : 'medium'; });
+
+    const contentSorted = scored.filter(s=>!s.isStop && s.score > 0).sort((a,b)=>b.score-a.score);
+    const largeCount = contentSorted.length === 0 ? 0 : Math.min(3, Math.max(1, Math.round(chunkWordsArr.length/6)));
+    for(let i=0;i<largeCount && i<contentSorted.length;i++){
+      contentSorted[i].w.size = 'large';
+    }
+    return chunkWordsArr;
+  }
+
+  function buildCaptionsFromWords(words){
+    const chunks = chunkWords(words);
+    return chunks.map(c=>{
+      classifyChunk(c);
+      const dur = Math.min(3400, Math.max(1800, c.length * 380));
+      return { duration: dur, words: c };
+    });
+  }
+
+  $('btn-generate').addEventListener('click', ()=>{
+    const raw = importTA.value.trim();
+    if(!raw){
+      importStatus.textContent = 'Paste a transcript with word /ipa/ pairs first.';
+      return;
+    }
+    const words = parseTranscript(raw);
+    if(words.length === 0){
+      importStatus.textContent = 'No "word /ipa/" pairs found. Check formatting.';
+      return;
+    }
+    const newCaptions = buildCaptionsFromWords(words);
+    captions = newCaptions;
+    stop();
+    goTo(0, null);
+    importStatus.textContent = 'Generated ' + newCaptions.length + ' caption chunk(s) from ' + words.length + ' words.';
+    setTimeout(()=>{ importOverlay.classList.add('hidden'); }, 700);
+  });
+
+  /* =========================================================
+     EXPORT
+  ========================================================= */
+  $('btn-export').addEventListener('click', ()=>{
+    const blob = new Blob([JSON.stringify(captions, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'captions.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  /* =========================================================
+     KEYBOARD SHORTCUTS
+  ========================================================= */
+  document.addEventListener('keydown', (e)=>{
+    if(document.activeElement && (document.activeElement.tagName === 'TEXTAREA')) return;
+    switch(e.key){
+      case ' ':
+      case 'ArrowDown': e.preventDefault(); stop(); next(); break;
+      case 'ArrowUp': e.preventDefault(); stop(); prev(); break;
+      case 'Home': stop(); goTo(0,null); break;
+      case 'End': stop(); goTo(captions.length-1,null); break;
+      case 'f': case 'F':
+        app.classList.contains('presenting') ? exitPresentation() : enterPresentation();
+        break;
+      case 'Escape': exitPresentation(); break;
+      case 'e': case 'E': openEdit(); break;
+      case 't': case 'T': importOverlay.classList.remove('hidden'); break;
+    }
+  });
+
+  /* =========================================================
+     INIT
+  ========================================================= */
+  goTo(0, null);
+
+})();
+</script>
+</body>
+</html>
