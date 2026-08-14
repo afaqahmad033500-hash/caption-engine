@@ -54,13 +54,23 @@ touching the visual code — just produce the same array shape.
 
 ## How caption length is decided (dynamic, not fixed)
 
-Caption chunks are no longer capped at a fixed word count. Each candidate
-group of words is actually rendered off-screen through the same fitting
-pipeline used for real playback; if it needs to shrink below ~94% of full
-scale to fit, it's split into two better-balanced, larger-looking captions
-instead. A short phrase might end up as 5 words, a longer one as 9 — the
-length is whatever the real measured layout supports at full, professional
-size, not an arbitrary cap.
+There is no fixed word-count target. Each word is first classified on its
+own merits (stopword → small; syllable count, stress, length, flapping,
+hard consonants → medium or large) — independent of whatever other words
+end up nearby, so the same word always renders the same size no matter
+which caption it lands in.
+
+Compositions are then built one word at a time: each candidate addition is
+actually rendered off-screen through the real fitting pipeline, and only
+kept if the composition still fits at (essentially) full, consistent scale.
+The moment the next word would require real shrinking — or would push a
+composition past three "large" pronunciation-focus words — that word
+starts the next caption instead. Word count is a *result* of what
+comfortably fits, never an input: a caption might end up with 3 words or
+9, whichever keeps the typography consistent across the whole speech. A
+small (0.85) safety floor still exists purely as a last resort for
+otherwise-unavoidable edge cases (e.g. one extremely long word), not as
+the primary sizing mechanism.
 
 ## Recording a caption sequence
 
