@@ -52,6 +52,29 @@ Because the renderer only ever reads the `captions` array, you can plug in
 other sources later (SRT import, automatic transcription, audio sync) without
 touching the visual code — just produce the same array shape.
 
+## Recording a caption sequence
+
+1. Paste your transcript and click **Generate Captions** (or load a JSON set).
+2. Click **⏺ Start Recording** in the bottom control panel.
+3. Your browser will show its native screen/tab-share picker — choose **This Tab**
+   (Chrome shows this as a one-click option; the app also passes a hint to
+   preselect it). This is the only manual step; everything else is automatic.
+4. The app switches to presentation mode (no controls visible, just the caption)
+   and auto-plays the full sequence from the start.
+5. When the sequence finishes (or you click **⏹ Stop Recording** early), a
+   `.webm` file downloads automatically.
+
+**Why tab capture instead of a canvas recorder:** capturing the literal
+rendered tab guarantees pixel-accurate fonts, letter-spacing, and CSS
+transition timing — a canvas/`html2canvas`-style per-frame redraw cannot
+reliably reproduce those. The trade-off is a one-time native permission
+prompt each time you record.
+
+**Format:** WebM only. MP4 cannot be encoded reliably in-browser without a
+server-side transcoder, so this intentionally does not claim to produce MP4.
+WebM plays natively in Chrome/Firefox/most editors, and converts to MP4
+easily via `ffmpeg -i in.webm out.mp4` or any online converter if needed.
+
 ## Keyboard shortcuts
 
 | Key | Action |

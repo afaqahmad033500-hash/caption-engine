@@ -96,7 +96,7 @@
     font-weight:300;
     letter-spacing:0.03em;
     color:#fff;
-    opacity:0.68;
+    opacity:0.82;
     font-size:0.3em;
     margin-bottom:0.3em;
   }
@@ -112,7 +112,7 @@
     font-size:clamp(66px, calc(17.2cqw * var(--caption-scale)), 122px);
   }
   .size-large .eng{ font-weight:560; letter-spacing:0.004em; }
-  .size-large .ipa{ opacity:0.8; }
+  .size-large .ipa{ opacity:0.92; }
 
   /* enter/exit states, applied via class swap */
   .comp.enter-next{ transform:translateY(calc(-50% + 44px)); opacity:0; }
@@ -226,6 +226,10 @@
       <span class="spacer"></span>
       <button class="ctl" id="btn-export">Export JSON</button>
     </div>
+    <div class="row">
+      <button class="ctl" id="btn-record">⏺ Start Recording</button>
+      <span id="record-status" style="opacity:0.6;"></span>
+    </div>
   </div>
 </div>
 
@@ -298,6 +302,22 @@
   let playing = false;
   let playTimer = null;
   let progressRAF = null;
+
+  // Idempotent-render state (Bug 2 fix): rather than looking up "the"
+  // outgoing composition via querySelector (which can grab a stale/wrong
+  // element if a previous transition's cleanup hasn't finished yet — e.g.
+  // a fast double-click firing two overlapping goTo() calls), we track the
+  // single active composition explicitly and force-clear anything else.
+  let activeComp = null;
+  let pendingRemovals = [];
+
+  function clearStrayComps(keep){
+    pendingRemovals.forEach(t => clearTimeout(t));
+    pendingRemovals = [];
+    zone.querySelectorAll('.comp').forEach(c=>{
+      if(c !== keep) c.remove();
+    });
+  }
 
   const $ = (id)=>document.getElementById(id);
   const app = $('app');
@@ -379,12 +399,20 @@
     for(const lineEl of lineEls){
       if(lineEl.scrollWidth <= availW) continue;
       const units = Array.from(lineEl.children);
+      // CRITICAL: measure each unit's real width WHILE it is still attached
+      // to the document. Once we clear innerHTML below, these nodes are
+      // detached and getBoundingClientRect()/offsetWidth silently return 0,
+      // which was the root cause of words overflowing the safe area (the
+      // re-split logic below always thought every word had ~0 width, so it
+      // never broke the line and the true overflow just got clipped).
+      const widths = units.map(u => u.getBoundingClientRect().width);
       lineEl.innerHTML = '';
       const newLines = [[]];
       let runningWidth = 0;
       const gap = parseFloat(getComputedStyle(lineEl).columnGap) || 0;
-      for(const unit of units){
-        const uw = unit.getBoundingClientRect().width || unit.offsetWidth;
+      for(let i=0;i<units.length;i++){
+        const unit = units[i];
+        const uw = widths[i] || unit.offsetWidth;
         const addW = (newLines[newLines.length-1].length ? gap : 0) + uw;
         if(runningWidth + addW > availW && newLines[newLines.length-1].length){
           newLines.push([]);
@@ -423,12 +451,14 @@
       comp.style.rowGap = '0.1em';
       compH = comp.getBoundingClientRect().height;
     }
+    const MIN_COMP_SCALE = 0.85; // never shrink a whole caption below this
     let iter = 0;
-    while(compH > availH && iter < 4){
+    let compScale = 1;
+    while(compH > availH && iter < 4 && compScale > MIN_COMP_SCALE){
+      const nextScale = Math.max(MIN_COMP_SCALE, compScale * 0.94);
+      compScale = nextScale;
       const allUnits = comp.querySelectorAll('.word-unit');
       allUnits.forEach(u=>{
-        const prevScale = parseFloat(u.dataset.scale || '1');
-        const nextScale = prevScale * 0.94;
         u.dataset.scale = nextScale;
         u.style.fontSize = 'calc(1em * ' + nextScale + ')';
       });
@@ -463,7 +493,13 @@
     // direction: 'next' | 'prev' | null (no animation, e.g. first render)
     if(index < 0 || index >= captions.length) return;
     const dur = setDurationVar();
-    const outgoing = zone.querySelector('.comp');
+
+    // Idempotency guarantee: whatever state a previous overlapping call
+    // left behind (e.g. two click events from a double-click firing before
+    // the first transition's removal timer had run), clean it up FIRST so
+    // we always start from a known state of "at most one active comp."
+    const outgoing = activeComp;
+    clearStrayComps(outgoing);
 
     const incoming = renderComposition(index);
     if(!incoming) return;
@@ -471,6 +507,7 @@
     if(!direction || !outgoing){
       if(outgoing) outgoing.remove();
       incoming.classList.add('resting');
+      activeComp = incoming;
       current = index;
       updateChrome();
       return;
@@ -488,8 +525,13 @@
       outgoing.classList.add(direction === 'next' ? 'exit-next' : 'exit-prev');
     });
 
-    setTimeout(()=>{ outgoing.remove(); }, dur + 30);
+    const removalTimer = setTimeout(()=>{
+      outgoing.remove();
+      pendingRemovals = pendingRemovals.filter(t => t !== removalTimer);
+    }, dur + 30);
+    pendingRemovals.push(removalTimer);
 
+    activeComp = incoming;
     current = index;
     updateChrome();
   }
@@ -774,6 +816,145 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  });
+
+  /* =========================================================
+     BUG 4: SCREEN RECORDING
+     Uses native getDisplayMedia + MediaRecorder rather than a
+     canvas/html2canvas reconstruction. Reasoning: canvas-based
+     "record the DOM" approaches redraw each frame from scratch and
+     routinely lose font rendering, letter-spacing, and CSS transition
+     timing — exactly the things this design depends on. Tab/window
+     capture instead records the literal pixels the browser is already
+     painting, so animation, typography and IPA positioning come through
+     exactly as shown in the preview, with zero risk of visual drift
+     from the master style.
+
+     Limitation to be upfront about: getDisplayMedia requires the user
+     to pick a capture source via the browser's native picker. Chrome
+     supports a "This Tab" option (and we pass preferCurrentTab as a
+     hint to preselect it), which effectively captures just this page —
+     but we cannot force it to capture only the #stage element; the
+     user should choose "This Tab" in the picker for the closest result
+     to "just the caption area." We auto-enter presentation mode before
+     capture starts so that, once "This Tab" is chosen, the entire
+     visible area IS just the caption (no controls, no browser chrome
+     inside the frame).
+
+     Output format: WebM (video/webm). MP4 is not reliably encodable
+     client-side without a server-side transcode step, so per the
+     request we do not pretend to support it — WebM plays natively in
+     Chrome/Firefox and is easily converted afterward if MP4 is needed.
+  ========================================================= */
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let displayStream = null;
+  const recordBtn = $('btn-record');
+  const recordStatus = $('record-status');
+
+  function pickMimeType(){
+    const candidates = [
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
+    for(const c of candidates){
+      if(window.MediaRecorder && MediaRecorder.isTypeSupported(c)) return c;
+    }
+    return '';
+  }
+
+  async function startRecording(){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
+      recordStatus.textContent = 'Screen recording is not supported in this browser.';
+      return;
+    }
+    try{
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 60 },
+        audio: false,
+        preferCurrentTab: true, // Chrome hint to preselect "This Tab"
+        selfBrowserSurface: 'include'
+      });
+    }catch(err){
+      recordStatus.textContent = 'Recording cancelled or denied.';
+      return;
+    }
+
+    const mimeType = pickMimeType();
+    if(!mimeType){
+      recordStatus.textContent = 'No supported WebM encoder found in this browser.';
+      displayStream.getTracks().forEach(t=>t.stop());
+      displayStream = null;
+      return;
+    }
+
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(displayStream, { mimeType, videoBitsPerSecond: 8_000_000 });
+    mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = finishRecording;
+
+    // If the user stops sharing via the browser's own "Stop sharing" UI,
+    // treat that the same as pressing our Stop button.
+    displayStream.getVideoTracks()[0].addEventListener('ended', ()=>{
+      if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    });
+
+    // Auto-enter presentation mode and restart the sequence from the top
+    // so the recording captures the full rolling animation cleanly.
+    enterPresentation();
+    stop(); // stop any existing autoplay/timers first (idempotent, see Bug 2 fix)
+    goTo(0, null);
+
+    mediaRecorder.start(250); // collect chunks every 250ms
+    recordBtn.textContent = '⏹ Stop Recording';
+    recordBtn.classList.add('active');
+    recordStatus.textContent = 'Recording…';
+
+    // Give presentation mode a moment to settle, then autoplay the deck.
+    setTimeout(()=>{ if(mediaRecorder && mediaRecorder.state === 'recording') play(); }, 200);
+  }
+
+  function stopRecording(){
+    if(mediaRecorder && mediaRecorder.state !== 'inactive'){
+      mediaRecorder.stop();
+    }
+  }
+
+  function finishRecording(){
+    if(displayStream){
+      displayStream.getTracks().forEach(t=>t.stop());
+      displayStream = null;
+    }
+    exitPresentation();
+    stop();
+
+    recordBtn.textContent = '⏺ Start Recording';
+    recordBtn.classList.remove('active');
+
+    if(recordedChunks.length === 0){
+      recordStatus.textContent = 'No video data captured.';
+      return;
+    }
+    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'caption-recording-' + Date.now() + '.webm';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+    recordStatus.textContent = 'Saved ' + a.download;
+    recordedChunks = [];
+  }
+
+  recordBtn.addEventListener('click', ()=>{
+    if(mediaRecorder && mediaRecorder.state === 'recording'){
+      stopRecording();
+    } else {
+      startRecording();
+    }
   });
 
   /* =========================================================
