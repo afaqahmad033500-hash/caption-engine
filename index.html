@@ -50,6 +50,26 @@
   #stage{
     position:relative;flex:1 1 auto;overflow:hidden;cursor:pointer;
     background:#000;
+    /* Root cause of the blue/teal tap overlay: mobile browsers paint a
+       default translucent highlight on any clickable element unless this
+       is explicitly disabled. #stage is clickable (advances captions),
+       so without this it flashed across the whole caption area on tap. */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    outline: none;
+  }
+  #stage:focus, #stage:active{ background:#000; outline:none; }
+  #caption-zone, .comp, .comp-line, .word-unit, .word-unit *{
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* Belt-and-suspenders for fullscreen/presentation mode specifically —
+     scoped to .presenting so normal-mode buttons/controls are untouched. */
+  .presenting, .presenting *{
+    -webkit-tap-highlight-color: transparent;
   }
   #caption-zone{
     position:absolute;
@@ -432,6 +452,13 @@
       lineEl.replaceWith(frag);
     }
 
+    // Minimum scale floor, shared by both the per-word emergency shrink
+    // (Step 3) and the whole-composition height shrink (Step 4), so a
+    // caption never ends up with one word rendered far smaller than the
+    // rest of that same composition — the inconsistency that was the
+    // actual cause of "some captions look too small."
+    const MIN_COMP_SCALE = 0.85;
+
     // Step 3: single-word-unit line still wider than available -> scale that word.
     lineEls = Array.from(comp.querySelectorAll('.comp-line'));
     for(const lineEl of lineEls){
@@ -439,8 +466,13 @@
         const unit = lineEl.children[0];
         const uw = unit.getBoundingClientRect().width;
         if(uw > availW){
-          const ratio = Math.max(0.55, (availW / uw) * 0.96);
+          const rawRatio = (availW / uw) * 0.96;
+          // Prefer the shared floor for a consistent look. Only go below
+          // it if the word genuinely still won't fit at that floor —
+          // staying inside the safe area always wins over uniform scale.
+          const ratio = rawRatio >= MIN_COMP_SCALE ? MIN_COMP_SCALE : Math.max(0.4, rawRatio);
           unit.style.fontSize = 'calc(1em * ' + ratio + ')';
+          unit.dataset.scale = ratio;
         }
       }
     }
@@ -451,16 +483,20 @@
       comp.style.rowGap = '0.1em';
       compH = comp.getBoundingClientRect().height;
     }
-    const MIN_COMP_SCALE = 0.85; // never shrink a whole caption below this
     let iter = 0;
     let compScale = 1;
     while(compH > availH && iter < 4 && compScale > MIN_COMP_SCALE){
       const nextScale = Math.max(MIN_COMP_SCALE, compScale * 0.94);
-      compScale = nextScale;
+      const factor = nextScale / compScale; // relative step, applied on top
+      compScale = nextScale;                // of whatever each unit already has
       const allUnits = comp.querySelectorAll('.word-unit');
       allUnits.forEach(u=>{
-        u.dataset.scale = nextScale;
-        u.style.fontSize = 'calc(1em * ' + nextScale + ')';
+        // Apply proportionally rather than overwriting outright, so this
+        // never undoes Step 3's per-word safe-area fix on the same unit.
+        const prev = parseFloat(u.dataset.scale || '1');
+        const next = prev * factor;
+        u.dataset.scale = next;
+        u.style.fontSize = 'calc(1em * ' + next + ')';
       });
       compH = comp.getBoundingClientRect().height;
       iter++;
@@ -723,13 +759,17 @@
   }
 
   function chunkWords(words){
+    // This is only a rough, upstream grouping pass now — it gives
+    // splitChunkToFit() below sentence-shaped material to work with.
+    // It is NOT what decides how many words end up in a caption; that
+    // is decided by actually measuring what fits (see splitChunkToFit).
     const chunks = [];
     let cur = [];
     const punctRe = /[.,!?;:]$/;
     for(let i=0;i<words.length;i++){
       cur.push(words[i]);
       const isPunct = punctRe.test(words[i].text);
-      const mustBreak = cur.length >= 9;
+      const mustBreak = cur.length >= 14; // loose upper bound, not a target
       if(mustBreak || (cur.length >= 5 && isPunct)){
         chunks.push(cur);
         cur = [];
@@ -775,13 +815,78 @@
     return chunkWordsArr;
   }
 
-  function buildCaptionsFromWords(words){
-    const chunks = chunkWords(words);
-    return chunks.map(c=>{
-      classifyChunk(c);
-      const dur = Math.min(3400, Math.max(1800, c.length * 380));
-      return { duration: dur, words: c };
+  // Comfortable-fit threshold: below this achieved scale, a composition
+  // is considered too cramped and gets split rather than shrunk further.
+  const FIT_SCALE_THRESHOLD = 0.94;
+
+  // Builds a candidate composition off-screen using the SAME renderer
+  // pipeline the real captions use (buildLinesStructural + fitComposition),
+  // then reads back the scale it actually needed in order to fit. This is
+  // real DOM measurement, not a word-count guess.
+  function measureCompositionFit(wordsArr){
+    const lines = buildLinesStructural(wordsArr);
+    const comp = buildCompositionDOM(lines);
+    comp.style.visibility = 'hidden';
+    comp.classList.add('resting');
+    zone.appendChild(comp);
+    void comp.offsetHeight;
+    fitComposition(comp);
+    let minScale = 1;
+    comp.querySelectorAll('.word-unit').forEach(u=>{
+      const s = parseFloat(u.dataset.scale || '1');
+      if(s < minScale) minScale = s;
     });
+    comp.remove();
+    return minScale;
+  }
+
+  // Recursively splits a chunk until every resulting piece fits comfortably
+  // (scale >= FIT_SCALE_THRESHOLD) at the current viewport size. This is
+  // the mechanism that removes the old fixed "9 words per caption" rule:
+  // a chunk only stays whole if it actually renders large and clean: if a
+  // 9-word chunk fits comfortably, it stays at 9; if it doesn't, it's split
+  // into two better-balanced, larger-looking captions instead of shrinking.
+  function splitChunkToFit(chunkWordsArr, depth){
+    depth = depth || 0;
+    const scale = measureCompositionFit(chunkWordsArr);
+    if(scale >= FIT_SCALE_THRESHOLD || chunkWordsArr.length <= 3 || depth >= 4){
+      return [chunkWordsArr];
+    }
+    // Prefer splitting right after a small/function word near the middle,
+    // so each half still reads as a natural phrase rather than an
+    // arbitrary mid-word cut.
+    const mid = Math.floor(chunkWordsArr.length / 2);
+    let splitAt = mid;
+    const searchRange = Math.max(1, Math.floor(chunkWordsArr.length / 3));
+    for(let offset = 0; offset <= searchRange; offset++){
+      const a = mid + offset, b = mid - offset;
+      if(a < chunkWordsArr.length - 1 && chunkWordsArr[a].size === 'small'){ splitAt = a + 1; break; }
+      if(b > 1 && chunkWordsArr[b].size === 'small'){ splitAt = b + 1; break; }
+    }
+    splitAt = Math.max(2, Math.min(chunkWordsArr.length - 2, splitAt));
+
+    const left = chunkWordsArr.slice(0, splitAt);
+    const right = chunkWordsArr.slice(splitAt);
+    // Re-classify each half on its own so the large-word selection stays
+    // proportionate to its smaller size, instead of carrying over
+    // large-word picks that made sense for the bigger original group.
+    classifyChunk(left);
+    classifyChunk(right);
+    return splitChunkToFit(left, depth + 1).concat(splitChunkToFit(right, depth + 1));
+  }
+
+  function buildCaptionsFromWords(words){
+    const roughGroups = chunkWords(words);
+    const finalChunks = [];
+    roughGroups.forEach(group=>{
+      classifyChunk(group);
+      const pieces = splitChunkToFit(group);
+      pieces.forEach(p=>{
+        const dur = Math.min(3400, Math.max(1800, p.length * 380));
+        finalChunks.push({ duration: dur, words: p });
+      });
+    });
+    return finalChunks;
   }
 
   $('btn-generate').addEventListener('click', ()=>{

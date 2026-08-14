@@ -52,6 +52,16 @@ Because the renderer only ever reads the `captions` array, you can plug in
 other sources later (SRT import, automatic transcription, audio sync) without
 touching the visual code — just produce the same array shape.
 
+## How caption length is decided (dynamic, not fixed)
+
+Caption chunks are no longer capped at a fixed word count. Each candidate
+group of words is actually rendered off-screen through the same fitting
+pipeline used for real playback; if it needs to shrink below ~94% of full
+scale to fit, it's split into two better-balanced, larger-looking captions
+instead. A short phrase might end up as 5 words, a longer one as 9 — the
+length is whatever the real measured layout supports at full, professional
+size, not an arbitrary cap.
+
 ## Recording a caption sequence
 
 1. Paste your transcript and click **Generate Captions** (or load a JSON set).
