@@ -52,6 +52,24 @@ Because the renderer only ever reads the `captions` array, you can plug in
 other sources later (SRT import, automatic transcription, audio sync) without
 touching the visual code — just produce the same array shape.
 
+## Why short/single-word captions could look too small (fixed)
+
+The Google Fonts link uses `font-display:swap`, so text briefly renders in
+the browser's fallback font while Oswald/Inter finish loading. Every
+scale decision in this engine depends on measuring real rendered text
+width — if that measurement happened before the real font had loaded, it
+was measuring the fallback font's (often wider) metrics, computing a more
+aggressive shrink than actually needed, and that shrink got baked into an
+inline style that never got recalculated once the correct font swapped
+in. Short/single-word captions were hit hardest because they're the ones
+most likely to get measured right after clicking Generate, before fonts
+have had time to finish loading.
+
+Fixed by waiting on the browser's Font Loading API (`document.fonts.ready`)
+before any measurement-based generation or rendering happens, with a
+safety-net re-fit of the current caption if anything ever gets displayed
+before fonts are confirmed ready.
+
 ## How caption length is decided (dynamic, not fixed)
 
 There is no fixed word-count target. Each word is first classified on its

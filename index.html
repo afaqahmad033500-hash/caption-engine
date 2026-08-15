@@ -113,10 +113,10 @@
   }
   .word-unit .ipa{
     font-family:"Inter",-apple-system,Arial,sans-serif;
-    font-weight:300;
+    font-weight:400;
     letter-spacing:0.03em;
     color:#fff;
-    opacity:0.82;
+    opacity:0.88;
     font-size:0.3em;
     margin-bottom:0.3em;
   }
@@ -132,7 +132,7 @@
     font-size:clamp(66px, calc(17.2cqw * var(--caption-scale)), 122px);
   }
   .size-large .eng{ font-weight:560; letter-spacing:0.004em; }
-  .size-large .ipa{ opacity:0.92; }
+  .size-large .ipa{ opacity:0.97; }
 
   /* enter/exit states, applied via class swap */
   .comp.enter-next{ transform:translateY(calc(-50% + 44px)); opacity:0; }
@@ -411,6 +411,17 @@
   }
 
   function fitComposition(comp){
+    // Defensive reset: every composition must compute its own scale from
+    // scratch. Each comp is already a brand-new DOM subtree (buildCompositionDOM
+    // creates fresh elements every time), so there is no structural way for a
+    // previous composition's scale to literally carry over — but we clear any
+    // stale dataset/inline sizing here anyway as an explicit guarantee, so
+    // nothing downstream can ever accidentally read a leftover value.
+    comp.querySelectorAll('.word-unit').forEach(u=>{
+      delete u.dataset.scale;
+      u.style.fontSize = '';
+    });
+
     const zoneRect = zone.getBoundingClientRect();
     const availW = zoneRect.width;
     const availH = zoneRect.height;
@@ -706,7 +717,7 @@
       editStatus.textContent = 'Formatted.';
     }catch(err){ editStatus.textContent = 'Invalid JSON: ' + err.message; }
   });
-  $('btn-apply').addEventListener('click', ()=>{
+  $('btn-apply').addEventListener('click', async ()=>{
     try{
       const parsed = JSON.parse(editTA.value);
       if(!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(c=>Array.isArray(c.words))){
@@ -714,6 +725,7 @@
       }
       captions = parsed;
       stop();
+      await ensureFontsReady();
       goTo(0, null);
       editOverlay.classList.add('hidden');
     }catch(err){ editStatus.textContent = 'Invalid JSON: ' + err.message; }
@@ -760,7 +772,46 @@
     return words;
   }
 
-  const VOWEL_RE = /[aeiouɪʊʌəɑɔæeɛɜɝoʊɐ]/gi;
+  /* =========================================================
+     FONT-LOADING GUARD (root cause of the single-word/short-caption
+     "too small" bug)
+
+     The Google Fonts link uses font-display:swap, so Oswald/Inter render
+     in the browser's fallback font until the real font finishes loading
+     asynchronously. Every shrink decision in fitComposition() depends on
+     getBoundingClientRect() measurements — if those run before Oswald has
+     loaded, they measure the FALLBACK font's (often wider) metrics, and
+     that overly aggressive shrink ratio gets baked into an inline
+     font-size that never gets recalculated once the real font swaps in.
+     This mainly shows up on short/single-word captions because they're
+     the most likely to get measured right after Generate, before fonts
+     have had time to finish loading.
+  ========================================================= */
+  let fontsReady = false;
+  async function ensureFontsReady(){
+    if(fontsReady) return;
+    if(document.fonts && document.fonts.ready){
+      try{
+        await Promise.all([
+          document.fonts.load('400 16px Oswald'),
+          document.fonts.load('560 16px Oswald'),
+          document.fonts.load('300 16px Inter')
+        ]);
+        await document.fonts.ready;
+      }catch(e){ /* feature not fully supported — proceed anyway */ }
+    }
+    fontsReady = true;
+  }
+  // Safety net: if anything was measured/rendered before fonts finished
+  // loading, re-fit the currently active caption once they're ready.
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(()=>{
+      fontsReady = true;
+      if(activeComp) goTo(current, null);
+    });
+  }
+
+
 
   // Word size is now an INTRINSIC property of the word itself — scored
   // independently, not relative to whatever other words happen to land in
@@ -857,7 +908,7 @@
     });
   }
 
-  $('btn-generate').addEventListener('click', ()=>{
+  $('btn-generate').addEventListener('click', async ()=>{
     const raw = importTA.value.trim();
     if(!raw){
       importStatus.textContent = 'Paste a transcript with word /ipa/ pairs first.';
@@ -868,6 +919,8 @@
       importStatus.textContent = 'No "word /ipa/" pairs found. Check formatting.';
       return;
     }
+    importStatus.textContent = 'Loading fonts…';
+    await ensureFontsReady();
     const newCaptions = buildCaptionsFromWords(words);
     captions = newCaptions;
     stop();
@@ -977,6 +1030,7 @@
     // so the recording captures the full rolling animation cleanly.
     enterPresentation();
     stop(); // stop any existing autoplay/timers first (idempotent, see Bug 2 fix)
+    await ensureFontsReady();
     goTo(0, null);
 
     mediaRecorder.start(250); // collect chunks every 250ms
