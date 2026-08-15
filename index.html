@@ -12,7 +12,11 @@
     --caption-scale:1;
     --anim-dur:360ms;
   }
-  *{box-sizing:border-box;}
+  *{
+    box-sizing:border-box;
+    -webkit-tap-highlight-color:transparent;
+    tap-highlight-color:transparent;
+  }
   html,body{
     margin:0;padding:0;width:100%;height:100%;background:#111;
     -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
@@ -50,27 +54,11 @@
   #stage{
     position:relative;flex:1 1 auto;overflow:hidden;cursor:pointer;
     background:#000;
-    /* Root cause of the blue/teal tap overlay: mobile browsers paint a
-       default translucent highlight on any clickable element unless this
-       is explicitly disabled. #stage is clickable (advances captions),
-       so without this it flashed across the whole caption area on tap. */
-    -webkit-tap-highlight-color: transparent;
-    -webkit-touch-callout: none;
-    -webkit-user-select: none;
-    user-select: none;
-    outline: none;
+    -webkit-user-select:none;user-select:none;
+    -webkit-touch-callout:none;
+    outline:none;
   }
-  #stage:focus, #stage:active{ background:#000; outline:none; }
-  #caption-zone, .comp, .comp-line, .word-unit, .word-unit *{
-    -webkit-tap-highlight-color: transparent;
-    -webkit-user-select: none;
-    user-select: none;
-  }
-  /* Belt-and-suspenders for fullscreen/presentation mode specifically —
-     scoped to .presenting so normal-mode buttons/controls are untouched. */
-  .presenting, .presenting *{
-    -webkit-tap-highlight-color: transparent;
-  }
+  #stage:focus, #stage:active{ outline:none; }
   #caption-zone{
     position:absolute;
     left:9%;right:9%;top:15%;bottom:22%;
@@ -94,6 +82,8 @@
     transition:transform var(--anim-dur) cubic-bezier(.22,.61,.36,1),
                opacity var(--anim-dur) cubic-bezier(.22,.61,.36,1);
     will-change:transform,opacity;
+    -webkit-user-select:none;user-select:none;
+    -webkit-touch-callout:none;
   }
   .comp-line{
     display:flex;flex-direction:row;align-items:flex-end;
@@ -116,23 +106,23 @@
     font-weight:400;
     letter-spacing:0.03em;
     color:#fff;
-    opacity:0.88;
+    opacity:0.8;
     font-size:0.3em;
     margin-bottom:0.3em;
   }
   .size-small{
-    font-size:clamp(30px, calc(8.6cqw * var(--caption-scale)), 56px);
+    font-size:clamp(30px, calc(8.6cqw * var(--caption-scale) * var(--comp-scale,1)), 56px);
   }
   .size-small .eng{ font-weight:400; }
   .size-medium{
-    font-size:clamp(46px, calc(12.4cqw * var(--caption-scale)), 82px);
+    font-size:clamp(46px, calc(12.4cqw * var(--caption-scale) * var(--comp-scale,1)), 82px);
   }
   .size-medium .eng{ font-weight:450; }
   .size-large{
-    font-size:clamp(66px, calc(17.2cqw * var(--caption-scale)), 122px);
+    font-size:clamp(66px, calc(17.2cqw * var(--caption-scale) * var(--comp-scale,1)), 122px);
   }
   .size-large .eng{ font-weight:560; letter-spacing:0.004em; }
-  .size-large .ipa{ opacity:0.97; }
+  .size-large .ipa{ opacity:0.9; }
 
   /* enter/exit states, applied via class swap */
   .comp.enter-next{ transform:translateY(calc(-50% + 44px)); opacity:0; }
@@ -247,7 +237,7 @@
       <button class="ctl" id="btn-export">Export JSON</button>
     </div>
     <div class="row">
-      <button class="ctl" id="btn-record">⏺ Start Recording</button>
+      <button class="ctl" id="btn-record">● Start Recording</button>
       <span id="record-status" style="opacity:0.6;"></span>
     </div>
   </div>
@@ -259,10 +249,9 @@
   <p class="hint">
     Paste each word immediately followed by its IPA in slashes, in any order/line breaks —
     e.g. <code>Tonight /təˈnaɪt/ I /aɪ/ can /kən/ report /rɪˈpɔrt/ ...</code>.
-    The engine classifies each word small/medium/large from its IPA complexity and
-    stopword status, then builds each caption by actually measuring how many words
-    fit at full, consistent scale — captions are never shrunk to cram more words in;
-    a group that gets crowded simply continues as the next caption instead.
+    The engine will auto-chunk into 5–9 word captions at punctuation boundaries,
+    classify each word small/medium/large from its IPA complexity and stopword status,
+    and fit everything to the existing renderer — no HTML/CSS editing needed.
   </p>
   <textarea id="import-textarea" placeholder="Tonight /təˈnaɪt/ I /aɪ/ can /kən/ report /rɪˈpɔrt/ that /ðət/ the /ðə/ United /juˈnaɪtɪd/ States /steɪts/ is /ɪz/ ready /ˈrɛdi/ ."></textarea>
   <div class="status" id="import-status"></div>
@@ -323,22 +312,8 @@
   let playing = false;
   let playTimer = null;
   let progressRAF = null;
-
-  // Idempotent-render state (Bug 2 fix): rather than looking up "the"
-  // outgoing composition via querySelector (which can grab a stale/wrong
-  // element if a previous transition's cleanup hasn't finished yet — e.g.
-  // a fast double-click firing two overlapping goTo() calls), we track the
-  // single active composition explicitly and force-clear anything else.
-  let activeComp = null;
-  let pendingRemovals = [];
-
-  function clearStrayComps(keep){
-    pendingRemovals.forEach(t => clearTimeout(t));
-    pendingRemovals = [];
-    zone.querySelectorAll('.comp').forEach(c=>{
-      if(c !== keep) c.remove();
-    });
-  }
+  let activeComp = null;   // the single composition currently on screen (resting or mid-transition-out)
+  let exitTimer = null;    // pending setTimeout that removes the previous outgoing comp
 
   const $ = (id)=>document.getElementById(id);
   const app = $('app');
@@ -411,21 +386,6 @@
   }
 
   function fitComposition(comp){
-    // Defensive reset: every composition must compute its own scale from
-    // scratch. Each comp is already a brand-new DOM subtree (buildCompositionDOM
-    // creates fresh elements every time), so there is no structural way for a
-    // previous composition's scale to literally carry over — but we clear any
-    // stale dataset/inline sizing here anyway as an explicit guarantee, so
-    // nothing downstream can ever accidentally read a leftover value.
-    // Guarded so this is a true no-op (no writes at all) for freshly-built
-    // compositions — an unconditional write here would force an extra
-    // synchronous layout on every single call, which matters a lot when
-    // this runs once per word during transcript generation.
-    comp.querySelectorAll('.word-unit').forEach(u=>{
-      if(u.dataset.scale !== undefined) delete u.dataset.scale;
-      if(u.style.fontSize) u.style.fontSize = '';
-    });
-
     const zoneRect = zone.getBoundingClientRect();
     const availW = zoneRect.width;
     const availH = zoneRect.height;
@@ -435,20 +395,18 @@
     for(const lineEl of lineEls){
       if(lineEl.scrollWidth <= availW) continue;
       const units = Array.from(lineEl.children);
-      // CRITICAL: measure each unit's real width WHILE it is still attached
-      // to the document. Once we clear innerHTML below, these nodes are
-      // detached and getBoundingClientRect()/offsetWidth silently return 0,
-      // which was the root cause of words overflowing the safe area (the
-      // re-split logic below always thought every word had ~0 width, so it
-      // never broke the line and the true overflow just got clipped).
-      const widths = units.map(u => u.getBoundingClientRect().width);
+      const gap = parseFloat(getComputedStyle(lineEl).columnGap) || 0;
+      // IMPORTANT: measure each unit's rendered width (which already
+      // accounts for the IPA line above it, since word-unit is a column
+      // flex box sized to its widest child) BEFORE detaching it from the
+      // DOM. Reading width from a detached node always returns 0, which
+      // previously made every unit appear "free" and defeated wrapping.
+      const widths = units.map(u => u.getBoundingClientRect().width || u.offsetWidth);
       lineEl.innerHTML = '';
       const newLines = [[]];
       let runningWidth = 0;
-      const gap = parseFloat(getComputedStyle(lineEl).columnGap) || 0;
-      for(let i=0;i<units.length;i++){
-        const unit = units[i];
-        const uw = widths[i] || unit.offsetWidth;
+      units.forEach((unit, i)=>{
+        const uw = widths[i];
         const addW = (newLines[newLines.length-1].length ? gap : 0) + uw;
         if(runningWidth + addW > availW && newLines[newLines.length-1].length){
           newLines.push([]);
@@ -456,7 +414,7 @@
         }
         newLines[newLines.length-1].push(unit);
         runningWidth += addW;
-      }
+      });
       // replace original line with possibly multiple lines
       const frag = document.createDocumentFragment();
       newLines.forEach(group=>{
@@ -468,54 +426,35 @@
       lineEl.replaceWith(frag);
     }
 
-    // Minimum scale floor, shared by both the per-word emergency shrink
-    // (Step 3) and the whole-composition height shrink (Step 4), so a
-    // caption never ends up with one word rendered far smaller than the
-    // rest of that same composition — the inconsistency that was the
-    // actual cause of "some captions look too small."
-    const MIN_COMP_SCALE = 0.85;
-
-    // Step 3: single-word-unit line still wider than available -> scale that word.
+    // Unified scale (last resort): one independently-computed scale for
+    // THIS composition only, applied once via --comp-scale. Every comp
+    // is a brand-new subtree each render, so there is no previous
+    // composition's scale, transform, or cached measurement to leak in.
+    // Shrinking is the last resort and only ever the minimum genuinely
+    // required to keep the composition inside the safe area — never an
+    // arbitrary floor that could either under-shrink (letting a very
+    // wide single word cross the safe margin) or over-shrink (making a
+    // short caption look tiny for no reason).
     lineEls = Array.from(comp.querySelectorAll('.comp-line'));
-    for(const lineEl of lineEls){
-      if(lineEl.children.length === 1){
-        const unit = lineEl.children[0];
-        const uw = unit.getBoundingClientRect().width;
-        if(uw > availW){
-          const rawRatio = (availW / uw) * 0.96;
-          // Prefer the shared floor for a consistent look. Only go below
-          // it if the word genuinely still won't fit at that floor —
-          // staying inside the safe area always wins over uniform scale.
-          const ratio = rawRatio >= MIN_COMP_SCALE ? MIN_COMP_SCALE : Math.max(0.4, rawRatio);
-          unit.style.fontSize = 'calc(1em * ' + ratio + ')';
-          unit.dataset.scale = ratio;
-        }
-      }
-    }
+    let widestLine = 0;
+    lineEls.forEach(le => { widestLine = Math.max(widestLine, le.scrollWidth); });
 
-    // Step 4: whole composition height check.
     let compH = comp.getBoundingClientRect().height;
     if(compH > availH){
       comp.style.rowGap = '0.1em';
       compH = comp.getBoundingClientRect().height;
     }
-    let iter = 0;
-    let compScale = 1;
-    while(compH > availH && iter < 4 && compScale > MIN_COMP_SCALE){
-      const nextScale = Math.max(MIN_COMP_SCALE, compScale * 0.94);
-      const factor = nextScale / compScale; // relative step, applied on top
-      compScale = nextScale;                // of whatever each unit already has
-      const allUnits = comp.querySelectorAll('.word-unit');
-      allUnits.forEach(u=>{
-        // Apply proportionally rather than overwriting outright, so this
-        // never undoes Step 3's per-word safe-area fix on the same unit.
-        const prev = parseFloat(u.dataset.scale || '1');
-        const next = prev * factor;
-        u.dataset.scale = next;
-        u.style.fontSize = 'calc(1em * ' + next + ')';
-      });
-      compH = comp.getBoundingClientRect().height;
-      iter++;
+
+    const SAFETY = 0.97;
+    const widthScale  = widestLine > availW ? (availW / widestLine) * SAFETY : 1;
+    const heightScale = compH > availH ? (availH / compH) * SAFETY : 1;
+    // Sanity backstop only — never a target. Guards against pathological
+    // content; ordinary captions never come close to needing this.
+    const HARD_MIN_SCALE = 0.4;
+    const scale = Math.max(HARD_MIN_SCALE, Math.min(1, widthScale, heightScale));
+
+    if(scale < 1){
+      comp.style.setProperty('--comp-scale', scale);
     }
   }
 
@@ -546,13 +485,21 @@
     if(index < 0 || index >= captions.length) return;
     const dur = setDurationVar();
 
-    // Idempotency guarantee: whatever state a previous overlapping call
-    // left behind (e.g. two click events from a double-click firing before
-    // the first transition's removal timer had run), clean it up FIRST so
-    // we always start from a known state of "at most one active comp."
-    const outgoing = activeComp;
-    clearStrayComps(outgoing);
+    // --- Idempotency guard -------------------------------------------
+    // If a previous goTo() call is still mid-transition (its exit timer
+    // hasn't fired yet — e.g. this call was triggered by a rapid second
+    // click), cancel that pending cleanup and synchronously purge any
+    // .comp element that isn't the one we know is actually active. This
+    // guarantees there is never more than one outgoing + one incoming
+    // composition in the zone, no matter how often/fast goTo is called.
+    clearTimeout(exitTimer);
+    exitTimer = null;
+    Array.from(zone.querySelectorAll('.comp')).forEach(el=>{
+      if(el !== activeComp) el.remove();
+    });
+    // -------------------------------------------------------------------
 
+    const outgoing = activeComp;
     const incoming = renderComposition(index);
     if(!incoming) return;
 
@@ -577,11 +524,7 @@
       outgoing.classList.add(direction === 'next' ? 'exit-next' : 'exit-prev');
     });
 
-    const removalTimer = setTimeout(()=>{
-      outgoing.remove();
-      pendingRemovals = pendingRemovals.filter(t => t !== removalTimer);
-    }, dur + 30);
-    pendingRemovals.push(removalTimer);
+    exitTimer = setTimeout(()=>{ outgoing.remove(); exitTimer = null; }, dur + 30);
 
     activeComp = incoming;
     current = index;
@@ -721,7 +664,7 @@
       editStatus.textContent = 'Formatted.';
     }catch(err){ editStatus.textContent = 'Invalid JSON: ' + err.message; }
   });
-  $('btn-apply').addEventListener('click', async ()=>{
+  $('btn-apply').addEventListener('click', ()=>{
     try{
       const parsed = JSON.parse(editTA.value);
       if(!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(c=>Array.isArray(c.words))){
@@ -729,7 +672,6 @@
       }
       captions = parsed;
       stop();
-      await ensureFontsReady();
       goTo(0, null);
       editOverlay.classList.add('hidden');
     }catch(err){ editStatus.textContent = 'Invalid JSON: ' + err.message; }
@@ -738,11 +680,10 @@
   /* =========================================================
      IMPORT / TRANSCRIPT-TO-CAPTIONS ENGINE
      User pastes: word /ipa/ word /ipa/ ...  (any spacing/newlines)
-     Engine: parses pairs -> classifies each word's intrinsic size ->
-     greedily builds each composition by measuring the real rendered
-     result, only adding a word while the composition still fits at full
-     target scale -> assigns per-chunk duration -> renders using the
-     exact same renderer as above.
+     Engine: parses pairs -> auto-chunks 5-9 words at punctuation
+     boundaries -> classifies small/medium/large from stopword +
+     IPA complexity -> assigns per-chunk duration -> renders using
+     the exact same renderer as above.
   ========================================================= */
   const importOverlay = $('import-overlay');
   const importTA = $('import-textarea');
@@ -776,167 +717,87 @@
     return words;
   }
 
-  /* =========================================================
-     FONT-LOADING GUARD (root cause of the single-word/short-caption
-     "too small" bug)
+  // Maximum stacked lines a single composition is allowed to grow to
+  // before it's split into another composition. This — not a word
+  // count — is what drives dynamic grouping: buildLinesStructural is
+  // the exact same layout rule the renderer uses, so a chunk is only
+  // ever as long as it can genuinely stay compact.
+  const MAX_LINES_PER_COMP = 3;
 
-     The Google Fonts link uses font-display:swap, so Oswald/Inter render
-     in the browser's fallback font until the real font finishes loading
-     asynchronously. Every shrink decision in fitComposition() depends on
-     getBoundingClientRect() measurements — if those run before Oswald has
-     loaded, they measure the FALLBACK font's (often wider) metrics, and
-     that overly aggressive shrink ratio gets baked into an inline
-     font-size that never gets recalculated once the real font swaps in.
-     This mainly shows up on short/single-word captions because they're
-     the most likely to get measured right after Generate, before fonts
-     have had time to finish loading.
-  ========================================================= */
-  let fontsReady = false;
-  function timeout(ms){
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-  async function ensureFontsReady(){
-    if(fontsReady) return;
-    if(document.fonts && document.fonts.ready){
-      try{
-        await Promise.race([
-          Promise.all([
-            document.fonts.load('400 16px Oswald'),
-            document.fonts.load('560 16px Oswald'),
-            document.fonts.load('300 16px Inter'),
-            document.fonts.ready
-          ]),
-          timeout(4000) // never block generation for more than 4s on this
-        ]);
-      }catch(e){ /* feature not fully supported — proceed anyway */ }
-    }
-    fontsReady = true;
-  }
-  // Safety net: if anything was measured/rendered before fonts finished
-  // loading, re-fit the currently active caption once they're ready.
-  if(document.fonts && document.fonts.ready){
-    document.fonts.ready.then(()=>{
-      fontsReady = true;
-      if(activeComp) goTo(current, null);
-    });
-  }
-
-
-
-  // Word size is now an INTRINSIC property of the word itself — scored
-  // independently, not relative to whatever other words happen to land in
-  // the same composition. This is the actual fix for the size
-  // inconsistency: the old approach picked the "top N scorers" within
-  // each chunk, so the exact same word could be marked large in one
-  // composition and merely medium in another purely because of where a
-  // chunk boundary fell, and a chunk made mostly of function words ended
-  // up with zero large words while a content-dense chunk got three —
-  // producing wildly different visual weight from one caption to the next
-  // even before any shrinking happened.
-  function classifyWordIntrinsic(w){
-    const clean = w.text.replace(/[^a-zA-Z']/g,'').toLowerCase();
-    if(STOPWORDS.has(clean)){ w.size = 'small'; return; }
-    const ipa = w.ipa || '';
-    let score = 1; // base: is a content word
-    score += (ipa.match(VOWEL_RE) || []).length; // syllable count
-    if(ipa.indexOf('ˈ') !== -1) score += 1;       // stressed
-    if(clean.length >= 7) score += 1;              // longer word
-    if(ipa.indexOf('ɾ') !== -1) score += 1;        // American flapping
-    if(/[θðʒ]/.test(ipa)) score += 1;              // hard consonants
-    w.size = score >= 5 ? 'large' : 'medium';
-  }
-
-  // Builds a candidate composition off-screen using the SAME renderer
-  // pipeline the real captions use (buildLinesStructural + fitComposition),
-  // then reads back the scale it actually needed in order to fit. This is
-  // real DOM measurement (width AND height), not a word-count guess.
-  function measureCompositionFit(wordsArr){
-    const lines = buildLinesStructural(wordsArr);
-    const comp = buildCompositionDOM(lines);
-    comp.style.visibility = 'hidden';
-    comp.classList.add('resting');
-    zone.appendChild(comp);
-    fitComposition(comp); // its first read already forces the needed layout
-    let minScale = 1;
-    comp.querySelectorAll('.word-unit').forEach(u=>{
-      const s = parseFloat(u.dataset.scale || '1');
-      if(s < minScale) minScale = s;
-    });
-    comp.remove();
-    return minScale;
-  }
-
-  // A composition may only grow while it still renders at ~full target
-  // scale. A small tolerance (not a hard 1.0) allows the "genuinely minor
-  // adjustment" the spec asks for without opening the door to real shrink.
-  const TARGET_SCALE_TOLERANCE = 0.97;
-  // Soft cap so a single composition can't accumulate an unreasonable
-  // number of "large" (pronunciation-focus) words — keeps the emphasis
-  // meaningful and matches the original 1–3-large-words-per-caption intent.
-  const MAX_LARGE_PER_COMP = 3;
-
-  // Yields back to the browser's event loop so it can repaint/respond
-  // between batches of measurement work — without this, a long transcript
-  // fully occupies the main thread for the entire generation, and the tab
-  // appears completely frozen (unresponsive to touch, no repaint) even
-  // though it's technically still working.
-  function nextTick(){
-    return new Promise(resolve => setTimeout(resolve, 0));
-  }
-  const YIELD_EVERY_N_WORDS = 15;
-
-  // Core algorithm (per the requested Steps 1–8):
-  //   1. Classify every word's intrinsic size first (above).
-  //   2/3. Grow a composition one word at a time, measuring the REAL
-  //        rendered result after each addition.
-  //   4/5. Keep adding while it still fits at target scale.
-  //   6/7. The moment the next word would require real shrinking (or would
-  //        push past the large-word soft cap), stop — start a new
-  //        composition instead of shrinking the current one.
-  //   8. A composition is never forced tiny just because it has many words;
-  //      word count is a RESULT of what fits, not an input.
-  async function buildCaptionsFromWords(words, onProgress){
-    words.forEach(classifyWordIntrinsic);
-
+  function chunkWords(words){
     const chunks = [];
-    let i = 0;
-    let sinceYield = 0;
-    while(i < words.length){
-      let comp = [words[i]];
-      let j = i + 1;
-      while(j < words.length){
-        const candidateWord = words[j];
-        const largeSoFar = comp.filter(w => w.size === 'large').length;
-        if(candidateWord.size === 'large' && largeSoFar >= MAX_LARGE_PER_COMP) break;
+    let cur = [];
+    const punctRe = /[.,!?;:]$/;
 
-        const candidate = comp.concat([candidateWord]);
-        const scale = measureCompositionFit(candidate);
+    for(let i=0;i<words.length;i++){
+      const w = words[i];
+      const candidate = cur.concat([w]);
+      const candLines = buildLinesStructural(candidate).length;
 
-        sinceYield++;
-        if(sinceYield >= YIELD_EVERY_N_WORDS){
-          sinceYield = 0;
-          if(onProgress) onProgress(j, words.length);
-          await nextTick();
-        }
-
-        if(scale >= TARGET_SCALE_TOLERANCE){
-          comp = candidate;
-          j++;
-        } else {
-          break; // adding this word would require real shrinking — stop here
-        }
+      if(candLines > MAX_LINES_PER_COMP && cur.length){
+        // This word would push the composition past its comfortable
+        // line budget — close off what we have and start fresh with it,
+        // rather than cramming it in and forcing a shrink later.
+        chunks.push(cur);
+        cur = [w];
+      } else {
+        cur = candidate;
       }
-      chunks.push(comp);
-      i += comp.length;
-    }
 
+      // Prefer to land a cut on a natural pause once the composition
+      // already has decent content, rather than always riding the line
+      // budget to its limit.
+      const isPunct = punctRe.test(w.text);
+      if(isPunct && cur.length >= 4 && buildLinesStructural(cur).length >= 2){
+        chunks.push(cur);
+        cur = [];
+      }
+    }
+    if(cur.length){
+      if(cur.length <= 2 && chunks.length){
+        const merged = chunks[chunks.length-1].concat(cur);
+        if(buildLinesStructural(merged).length <= MAX_LINES_PER_COMP){
+          chunks[chunks.length-1] = merged;
+        } else {
+          chunks.push(cur);
+        }
+      } else {
+        chunks.push(cur);
+      }
+    }
+    return chunks;
+  }
+
+  const VOWEL_RE = /[aeiouɪʊʌəɑɔæeɛɜɝoʊɐ]/gi;
+
+  // Chunk-independent classification: every word's size is decided from
+  // its own text/IPA complexity alone, never from which chunk it lands
+  // in. This keeps grouping (above) and classification (here) decoupled,
+  // so a composition's word-size mix is consistent regardless of where
+  // the dynamic grouper happened to cut.
+  function classifyWord(w){
+    const clean = w.text.replace(/[^a-zA-Z']/g,'').toLowerCase();
+    if(STOPWORDS.has(clean)) return 'small';
+    const ipa = w.ipa || '';
+    let score = 2;
+    score += (ipa.match(VOWEL_RE) || []).length;
+    if(ipa.indexOf('ˈ') !== -1) score += 1;
+    if(clean.length >= 7) score += 1;
+    if(ipa.indexOf('ɾ') !== -1) score += 1; // American flapping
+    if(/[θðʒ]/.test(ipa)) score += 1; // hard consonants
+    return score >= 5 ? 'large' : 'medium';
+  }
+
+  function buildCaptionsFromWords(words){
+    words.forEach(w => { w.size = classifyWord(w); });
+    const chunks = chunkWords(words);
     return chunks.map(c=>{
       const dur = Math.min(3400, Math.max(1800, c.length * 380));
       return { duration: dur, words: c };
     });
   }
 
-  $('btn-generate').addEventListener('click', async ()=>{
+  $('btn-generate').addEventListener('click', ()=>{
     const raw = importTA.value.trim();
     if(!raw){
       importStatus.textContent = 'Paste a transcript with word /ipa/ pairs first.';
@@ -947,12 +808,7 @@
       importStatus.textContent = 'No "word /ipa/" pairs found. Check formatting.';
       return;
     }
-    importStatus.textContent = 'Loading fonts…';
-    await ensureFontsReady();
-    importStatus.textContent = 'Generating… 0 / ' + words.length + ' words';
-    const newCaptions = await buildCaptionsFromWords(words, (done, total)=>{
-      importStatus.textContent = 'Generating… ' + done + ' / ' + total + ' words';
-    });
+    const newCaptions = buildCaptionsFromWords(words);
     captions = newCaptions;
     stop();
     goTo(0, null);
@@ -976,143 +832,139 @@
   });
 
   /* =========================================================
-     BUG 4: SCREEN RECORDING
-     Uses native getDisplayMedia + MediaRecorder rather than a
-     canvas/html2canvas reconstruction. Reasoning: canvas-based
-     "record the DOM" approaches redraw each frame from scratch and
-     routinely lose font rendering, letter-spacing, and CSS transition
-     timing — exactly the things this design depends on. Tab/window
-     capture instead records the literal pixels the browser is already
-     painting, so animation, typography and IPA positioning come through
-     exactly as shown in the preview, with zero risk of visual drift
-     from the master style.
-
-     Limitation to be upfront about: getDisplayMedia requires the user
-     to pick a capture source via the browser's native picker. Chrome
-     supports a "This Tab" option (and we pass preferCurrentTab as a
-     hint to preselect it), which effectively captures just this page —
-     but we cannot force it to capture only the #stage element; the
-     user should choose "This Tab" in the picker for the closest result
-     to "just the caption area." We auto-enter presentation mode before
-     capture starts so that, once "This Tab" is chosen, the entire
-     visible area IS just the caption (no controls, no browser chrome
-     inside the frame).
-
-     Output format: WebM (video/webm). MP4 is not reliably encodable
-     client-side without a server-side transcode step, so per the
-     request we do not pretend to support it — WebM plays natively in
-     Chrome/Firefox and is easily converted afterward if MP4 is needed.
+     SCREEN RECORDING (caption preview only)
+     Native pipeline, no external libraries:
+       1. getDisplayMedia() asks the user to share a tab/screen.
+       2. That raw stream is piped into a hidden <video>.
+       3. Every animation frame, just the #app rectangle (the
+          vertical preview: topbar + stage, NOT the controls
+          panel) is cropped out of that video onto an offscreen
+          <canvas> sized to #app's own aspect ratio.
+       4. MediaRecorder records THAT canvas's captureStream(),
+          so the exported file contains only the caption preview.
+     WebM is used because it is the only format browsers can
+     reliably mux client-side without a server-side encoder;
+     MP4 is not attempted.
   ========================================================= */
-  let mediaRecorder = null;
-  let recordedChunks = [];
-  let displayStream = null;
-  const recordBtn = $('btn-record');
+  const btnRecord = $('btn-record');
   const recordStatus = $('record-status');
 
+  let displayStream = null;
+  let sourceVideo = null;
+  let recordCanvas = null;
+  let recordCtx = null;
+  let cropRAF = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let isRecording = false;
+
   function pickMimeType(){
-    const candidates = [
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8',
-      'video/webm'
-    ];
+    const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
     for(const c of candidates){
-      if(window.MediaRecorder && MediaRecorder.isTypeSupported(c)) return c;
+      if(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c;
     }
-    return '';
+    return 'video/webm';
   }
 
   async function startRecording(){
+    if(isRecording) return;
     if(!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
       recordStatus.textContent = 'Screen recording is not supported in this browser.';
       return;
     }
+    if(!window.MediaRecorder){
+      recordStatus.textContent = 'MediaRecorder is not supported in this browser.';
+      return;
+    }
+
+    recordStatus.textContent = 'Choose "This Tab" in the share dialog…';
     try{
       displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 60 },
+        video: { frameRate: 30, cursor: 'never' },
         audio: false,
-        preferCurrentTab: true, // Chrome hint to preselect "This Tab"
-        selfBrowserSurface: 'include'
+        preferCurrentTab: true,        // Chrome hint; ignored elsewhere
+        selfBrowserSurface: 'include'  // Chrome hint; ignored elsewhere
       });
-    }catch(err){
-      recordStatus.textContent = 'Recording cancelled or denied.';
+    } catch(err){
+      recordStatus.textContent = 'Recording cancelled.';
       return;
     }
 
-    const mimeType = pickMimeType();
-    if(!mimeType){
-      recordStatus.textContent = 'No supported WebM encoder found in this browser.';
-      displayStream.getTracks().forEach(t=>t.stop());
-      displayStream = null;
-      return;
+    sourceVideo = document.createElement('video');
+    sourceVideo.muted = true;
+    sourceVideo.playsInline = true;
+    sourceVideo.srcObject = displayStream;
+    await sourceVideo.play().catch(()=>{});
+    if(!sourceVideo.videoWidth){
+      await new Promise(res=>{ sourceVideo.onloadedmetadata = res; });
     }
 
+    const rect = app.getBoundingClientRect();
+    const scaleX = sourceVideo.videoWidth / window.innerWidth;
+    const scaleY = sourceVideo.videoHeight / window.innerHeight;
+
+    recordCanvas = document.createElement('canvas');
+    recordCanvas.width = Math.max(2, Math.round(rect.width * scaleX));
+    recordCanvas.height = Math.max(2, Math.round(rect.height * scaleY));
+    recordCtx = recordCanvas.getContext('2d');
+
+    function drawFrame(){
+      const r = app.getBoundingClientRect();
+      const sx = Math.max(0, r.left * scaleX);
+      const sy = Math.max(0, r.top * scaleY);
+      const sw = r.width * scaleX;
+      const sh = r.height * scaleY;
+      try{
+        recordCtx.drawImage(sourceVideo, sx, sy, sw, sh, 0, 0, recordCanvas.width, recordCanvas.height);
+      }catch(e){ /* transient frame errors are safe to ignore */ }
+      cropRAF = requestAnimationFrame(drawFrame);
+    }
+    drawFrame();
+
+    const canvasStream = recordCanvas.captureStream(30);
     recordedChunks = [];
-    mediaRecorder = new MediaRecorder(displayStream, { mimeType, videoBitsPerSecond: 8_000_000 });
-    mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder = new MediaRecorder(canvasStream, { mimeType: pickMimeType() });
+    mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size) recordedChunks.push(e.data); };
     mediaRecorder.onstop = finishRecording;
+    mediaRecorder.start();
 
-    // If the user stops sharing via the browser's own "Stop sharing" UI,
-    // treat that the same as pressing our Stop button.
     displayStream.getVideoTracks()[0].addEventListener('ended', ()=>{
-      if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      if(isRecording) stopRecording();
     });
 
-    // Auto-enter presentation mode and restart the sequence from the top
-    // so the recording captures the full rolling animation cleanly.
-    enterPresentation();
-    stop(); // stop any existing autoplay/timers first (idempotent, see Bug 2 fix)
-    await ensureFontsReady();
-    goTo(0, null);
-
-    mediaRecorder.start(250); // collect chunks every 250ms
-    recordBtn.textContent = '⏹ Stop Recording';
-    recordBtn.classList.add('active');
-    recordStatus.textContent = 'Recording…';
-
-    // Give presentation mode a moment to settle, then autoplay the deck.
-    setTimeout(()=>{ if(mediaRecorder && mediaRecorder.state === 'recording') play(); }, 200);
+    isRecording = true;
+    btnRecord.textContent = '■ Stop Recording';
+    btnRecord.classList.add('active');
+    recordStatus.textContent = 'Recording the caption preview…';
   }
 
   function stopRecording(){
-    if(mediaRecorder && mediaRecorder.state !== 'inactive'){
-      mediaRecorder.stop();
-    }
+    if(!isRecording) return;
+    isRecording = false;
+    cancelAnimationFrame(cropRAF);
+    if(mediaRecorder && mediaRecorder.state !== 'inactive'){ mediaRecorder.stop(); }
+    if(displayStream){ displayStream.getTracks().forEach(t=>t.stop()); displayStream = null; }
+    if(sourceVideo){ sourceVideo.pause(); sourceVideo.srcObject = null; sourceVideo = null; }
+    btnRecord.textContent = '● Start Recording';
+    btnRecord.classList.remove('active');
   }
 
   function finishRecording(){
-    if(displayStream){
-      displayStream.getTracks().forEach(t=>t.stop());
-      displayStream = null;
-    }
-    exitPresentation();
-    stop();
-
-    recordBtn.textContent = '⏺ Start Recording';
-    recordBtn.classList.remove('active');
-
-    if(recordedChunks.length === 0){
-      recordStatus.textContent = 'No video data captured.';
-      return;
-    }
     const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    recordedChunks = [];
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'caption-recording-' + Date.now() + '.webm';
+    a.download = 'caption-recording.webm';
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(()=>URL.revokeObjectURL(url), 4000);
-    recordStatus.textContent = 'Saved ' + a.download;
-    recordedChunks = [];
+    recordStatus.textContent = 'Saved caption-recording.webm';
   }
 
-  recordBtn.addEventListener('click', ()=>{
-    if(mediaRecorder && mediaRecorder.state === 'recording'){
-      stopRecording();
-    } else {
-      startRecording();
-    }
+  btnRecord.addEventListener('click', ()=>{
+    isRecording ? stopRecording() : startRecording();
   });
 
   /* =========================================================
