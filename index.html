@@ -992,6 +992,17 @@
   ========================================================= */
   goTo(0, null);
 
+  // Oswald loads asynchronously; if a composition is measured/scaled
+  // before it swaps in, the fallback font's (usually narrower) metrics
+  // can under-estimate the real width, letting a word cross the safe
+  // margin once the real font arrives. Re-fit whatever composition is
+  // on screen once the font is actually ready, so it's corrected.
+  if(document.fonts && document.fonts.ready){
+    document.fonts.ready.then(()=>{
+      if(activeComp) fitComposition(activeComp);
+    }).catch(()=>{});
+  }
+
 })();
 </script>
 </body>
