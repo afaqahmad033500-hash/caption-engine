@@ -456,6 +456,22 @@
     if(scale < 1){
       comp.style.setProperty('--comp-scale', scale);
     }
+
+    // Final guarantee: clamp()'s own authored minimum (66px/46px/30px)
+    // can stop --comp-scale from shrinking a very long word enough on
+    // its own to fit. If a line is still wider than the safe area after
+    // that, visually compress just that line with a transform — this
+    // never touches the authored font-size, so typography is unaffected;
+    // it only ever engages in this rare leftover case.
+    lineEls = Array.from(comp.querySelectorAll('.comp-line'));
+    lineEls.forEach(le=>{
+      const w = le.scrollWidth;
+      if(w > availW){
+        const extra = (availW / w) * SAFETY;
+        le.style.transform = 'scale(' + extra + ')';
+        le.style.transformOrigin = 'center';
+      }
+    });
   }
 
   function renderComposition(index, enterDir){
