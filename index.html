@@ -417,9 +417,13 @@
     // previous composition's scale to literally carry over — but we clear any
     // stale dataset/inline sizing here anyway as an explicit guarantee, so
     // nothing downstream can ever accidentally read a leftover value.
+    // Guarded so this is a true no-op (no writes at all) for freshly-built
+    // compositions — an unconditional write here would force an extra
+    // synchronous layout on every single call, which matters a lot when
+    // this runs once per word during transcript generation.
     comp.querySelectorAll('.word-unit').forEach(u=>{
-      delete u.dataset.scale;
-      u.style.fontSize = '';
+      if(u.dataset.scale !== undefined) delete u.dataset.scale;
+      if(u.style.fontSize) u.style.fontSize = '';
     });
 
     const zoneRect = zone.getBoundingClientRect();
@@ -788,16 +792,22 @@
      have had time to finish loading.
   ========================================================= */
   let fontsReady = false;
+  function timeout(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
   async function ensureFontsReady(){
     if(fontsReady) return;
     if(document.fonts && document.fonts.ready){
       try{
-        await Promise.all([
-          document.fonts.load('400 16px Oswald'),
-          document.fonts.load('560 16px Oswald'),
-          document.fonts.load('300 16px Inter')
+        await Promise.race([
+          Promise.all([
+            document.fonts.load('400 16px Oswald'),
+            document.fonts.load('560 16px Oswald'),
+            document.fonts.load('300 16px Inter'),
+            document.fonts.ready
+          ]),
+          timeout(4000) // never block generation for more than 4s on this
         ]);
-        await document.fonts.ready;
       }catch(e){ /* feature not fully supported — proceed anyway */ }
     }
     fontsReady = true;
@@ -846,8 +856,7 @@
     comp.style.visibility = 'hidden';
     comp.classList.add('resting');
     zone.appendChild(comp);
-    void comp.offsetHeight;
-    fitComposition(comp);
+    fitComposition(comp); // its first read already forces the needed layout
     let minScale = 1;
     comp.querySelectorAll('.word-unit').forEach(u=>{
       const s = parseFloat(u.dataset.scale || '1');
@@ -866,6 +875,16 @@
   // meaningful and matches the original 1–3-large-words-per-caption intent.
   const MAX_LARGE_PER_COMP = 3;
 
+  // Yields back to the browser's event loop so it can repaint/respond
+  // between batches of measurement work — without this, a long transcript
+  // fully occupies the main thread for the entire generation, and the tab
+  // appears completely frozen (unresponsive to touch, no repaint) even
+  // though it's technically still working.
+  function nextTick(){
+    return new Promise(resolve => setTimeout(resolve, 0));
+  }
+  const YIELD_EVERY_N_WORDS = 15;
+
   // Core algorithm (per the requested Steps 1–8):
   //   1. Classify every word's intrinsic size first (above).
   //   2/3. Grow a composition one word at a time, measuring the REAL
@@ -876,11 +895,12 @@
   //        composition instead of shrinking the current one.
   //   8. A composition is never forced tiny just because it has many words;
   //      word count is a RESULT of what fits, not an input.
-  function buildCaptionsFromWords(words){
+  async function buildCaptionsFromWords(words, onProgress){
     words.forEach(classifyWordIntrinsic);
 
     const chunks = [];
     let i = 0;
+    let sinceYield = 0;
     while(i < words.length){
       let comp = [words[i]];
       let j = i + 1;
@@ -891,6 +911,14 @@
 
         const candidate = comp.concat([candidateWord]);
         const scale = measureCompositionFit(candidate);
+
+        sinceYield++;
+        if(sinceYield >= YIELD_EVERY_N_WORDS){
+          sinceYield = 0;
+          if(onProgress) onProgress(j, words.length);
+          await nextTick();
+        }
+
         if(scale >= TARGET_SCALE_TOLERANCE){
           comp = candidate;
           j++;
@@ -921,7 +949,10 @@
     }
     importStatus.textContent = 'Loading fonts…';
     await ensureFontsReady();
-    const newCaptions = buildCaptionsFromWords(words);
+    importStatus.textContent = 'Generating… 0 / ' + words.length + ' words';
+    const newCaptions = await buildCaptionsFromWords(words, (done, total)=>{
+      importStatus.textContent = 'Generating… ' + done + ' / ' + total + ' words';
+    });
     captions = newCaptions;
     stop();
     goTo(0, null);

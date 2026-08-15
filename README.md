@@ -52,6 +52,24 @@ Because the renderer only ever reads the `captions` array, you can plug in
 other sources later (SRT import, automatic transcription, audio sync) without
 touching the visual code — just produce the same array shape.
 
+## Why Generate could freeze the tab on long transcripts (fixed)
+
+Generating captions works by actually measuring each candidate composition
+in the live page, which is accurate but not free. On a long transcript this
+used to run as one uninterrupted block — hundreds of measurement passes
+back-to-back with no pauses — which fully occupied the browser's main
+thread and made the tab completely unresponsive (no repaint, no touch
+response) until it finished. On slower mobile hardware that could stretch
+into minutes and looked identical to the page being broken.
+
+Fixed by: yielding control back to the browser periodically during
+generation (so it can repaint and show live progress instead of freezing),
+removing two redundant forced-layout calls from the per-word measurement
+path, and adding a 4-second timeout safeguard around the font-loading wait
+so it can never block generation indefinitely. None of this changes what
+captions get generated — only how the browser behaves while generating
+them.
+
 ## Why short/single-word captions could look too small (fixed)
 
 The Google Fonts link uses `font-display:swap`, so text briefly renders in
